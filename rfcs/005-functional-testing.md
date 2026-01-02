@@ -10,31 +10,32 @@ issue: "https://github.com/documentdb/documentdb/issues/367"
 
 ## Problem
 
-DocumentDB currently lacks a systematic functional testing framework that can validate correctness and measure compatibility with MongoDB APIs and behaviors.
+DocumentDB currently lacks a systematic end-to-end functional testing framework that can validate correctness of its functionality.
 
 **Who is impacted:**
 - Contributors who cannot easily validate that their changes don't break existing functionality
 - Users who may encounter regressions due to insufficient testing coverage
-- Product teams who lack visibility into MongoDB compatibility metrics
+- Product teams who lack visibility into functional correctness metrics
 
 **Current consequences:**
 - **Limited Confidence**: Developers cannot easily validate that their changes don't break existing functionality
-- **Compatibility Gaps**: No systematic way to measure and track compatibility with MongoDB
+- **Functional Gaps**: No systematic way to measure and track end-to-end functional correctness
 - **Manual Testing Burden**: Contributors rely on manual testing, slowing development velocity
-- **Regression Risk**: Lack of automated testing increases the risk of introducing regressions
-- **Feature Validation**: There is no testing framework to allow contributors to write new test cases to validate their features and comnpatibility with MongoDB behavior
+- **Regression Risk**: Lack of automated end-to-end testing increases the risk of introducing regressions
+- **Feature Validation**: There is no testing framework to allow contributors to write end-to-end new test cases to validate their features
 
 **Current workarounds:**
 - Manual testing by contributors before submitting PRs
-- Ad-hoc compatibility testing
+- Ad-hoc end-to-end functional testing
 - Reliance on unit tests that don't cover end-to-end scenarios
-- Post-deployment discovery of functional or compatibility issues
+- Post-deployment discovery of functional issues
 
 **Success criteria:**
 - Users are able to run all functional tests against locally hosted or remotely hosted DocumentDB with a single command and no setup involved
-- Contributors can simply add new test files and it would get picked up by the test runner and include in the functional test suite
+- Contributors can simply add new test files and it would automatically get picked up to be run as part of the functional test suite
 - Contributors/ users should get a list of all the test failures together (the test execution should not abort on a single failed test)
-- Contributors get easy to understand messages/logs for each failing test that points to the exact assertion that has failed
+- Contributors get easy to understand messages/logs for each failing test that points to the exact cause for the failure
+- Contributors should get failed tests categorized by feature tags to make it easy to understand which features have issues
 
 **Non-goals:**
 - Performance/load/stress testing
@@ -46,23 +47,23 @@ DocumentDB currently lacks a systematic functional testing framework that can va
 
 ## Approach
 
-The proposed solution is a comprehensive functional testing framework that combines two complementary approaches:
+The proposed solution is a end-to-end functional testing framework that uses **specification-based testing** to validate DocumentDB functionality.
 
-1. **Custom Functional Test Suite**: A purpose-built test suite specifically designed for DocumentDB to validate functional correctness and compatibility with MongoDB.
-2. **MongoDB Service Tests Integration**: Leveraging existing MongoDB service tests without modification to measure compatibility.
+**Self-contained Test Suite**: Tests with explicit specifications that define expected behavior for DocumentDB features. Tests can be executed against any engine implementing the MongoDB wire protocol.
 
 **Why this approach is preferable:**
 
-- **Comprehensive Coverage**: Custom tests ensure DocumentDB-specific scenarios are covered, while MongoDB service tests provide broad compatibility validation
-- **Dual Validation**: Running the same tests against both DocumentDB and MongoDB provides direct compatibility measurement
-- **Scalability**: The purpose-built framework will be designed for easy test authoring and parallel execution
+- **Specification-based**: Tests define explicit expectations for DocumentDB behavior
+- **Self-contained**: Each test includes all necessary setup and assertions
+- **Future-proof**: Has the ability to support DocumentDB-unique features and functionality
+- **Leverages pytest**: Uses proven testing infrastructure
 
 **Key benefits:**
-- Automated compatibility measurement and reporting
-- Easy test authoring for contributors using familiar Python/PyMongo
+- Automated functional correctness validation using pytest
+- Easy test authoring for contributors using familiar pytest
 - Integration with existing development workflows (local, CI/CD)
 - Clear failure reporting and debugging capabilities
-- Systematic test organization using multi-dimensional tagging
+- Systematic test organization using pytest markers
 
 **Key tradeoffs:**
 - Initial development investment for the testing infrastructure vs long-term development velocity gains
@@ -70,7 +71,7 @@ The proposed solution is a comprehensive functional testing framework that combi
 
 **Alignment with existing architecture:**
 - Integrates with current CI/CD infrastructure (GitHub Actions)
-- Follows Docker-based deployment patterns
+- Supports both local execution and execution in remote environments (via a Docker image)
 - Complements existing unit testing framework
 
 ---
@@ -79,456 +80,282 @@ The proposed solution is a comprehensive functional testing framework that combi
 
 ### Functional Components
 
-The functional testing framework consists of several key components that work together to provide comprehensive testing capabilities.
+The end-to-end functional testing framework leverages pytest as the core testing infrastructure and adds a separate component to process the test results.
 
-**1. Test Runner:**
-- **Purpose**: Orchestrates overall test execution strategy and coordinates the testing workflow
+**1. pytest Framework:**
+- **Purpose**: Handles test discovery, execution, parallelization, and reporting
 - **Responsibilities**:
-  - Parses test configuration parameters
-  - Identifies the right set of tests to execute based on test suite, tags, and filters
-  - Schedules tests based on dependencies and parallelism settings
-  - Coordinates with Test Executor for test execution
-  - Manages overall test execution workflow
+  - Test discovery and filtering using pytest markers
+  - Parallel test execution using pytest-xdist (multiprocessing)
+  - Multi-engine test execution via parametrization
+  - Fixture-based setup and cleanup
+  - Multiple output formats via plugins
 
-**2. Test Executor:**
-- **Purpose**: Executes tests using the appropriate test framework and manages test lifecycle
+**2. Result Analyzer:**
+- **Purpose**: Post-processes pytest results to generate metrics
 - **Responsibilities**:
-  - Executes individual tests from the specified test suite
-  - Manages test lifecycle (setup, run test, collect result, cleanup)
-  - Handles test isolation (namespace isolation, data seeding)
-  - Runs tests in parallel internally using threads or processes based on parallelism configuration
-  - Collects and returns test results to Test Runner
+  - Analyzes pass/fail results for DocumentDB functionality
+  - Generates metrics by feature tags
+  - Categorizes failure types (UNSUPPORTED, SPEC_FAILURE, UNEXPECTED_ERROR)
+  - Creates dashboards and reports
 
-**Why Test Executor is Separate:**
-
-The Test Executor is architecturally separated from the Test Runner to enable future extensibility:
-
-1. **Distributed Test Execution**: Test Executor could be deployed across multiple machines for large-scale parallel testing, while Test Runner remains centralized for coordination.
-
-2. **Multiple Execution Engines**: Different Test Executor implementations can support different test frameworks:
-   - PyMongo-based executor (initial implementation)
-   - JavaScript/Node.js executor (for MongoDB driver tests)
-   - Other language-specific executors as needed
-
-3. **Pluggable Execution Strategies**: Test Executor can be swapped or extended without modifying Test Runner:
-   - Local execution (initial implementation)
-   - Remote execution (cloud-based test execution)
-   - Containerized execution (each test in isolated container)
-   - Custom execution strategies for specific test types
-
-This separation follows the **Strategy Pattern**, where Test Runner defines the orchestration logic, and Test Executor provides the test execution implementation.
-
-**3. Result Analyzer:**
-- **Purpose**: Analyzes and compares test results
-- **Responsibilities**:
-  - Compares results between DocumentDB and MongoDB
-  - Generates compatibility metrics and statistics
-  - Identifies patterns in test failures
-
-**4. Test Suites:**
-- **Custom Functional Test Suite**: 
-  - DocumentDB-specific functional tests using Python/PyMongo
-  - Multi-dimensional tagging system for test organization
+**3. Test Suites:**
+- **DocumentDB Functional Test Suite**: 
+  - Self-contained tests with explicit specifications for DocumentDB functionality
+  - Multi-dimensional tagging system using pytest markers
   - Designed for easy test authoring by contributors
-- **MongoDB Service Tests**: 
-  - Existing MongoDB compatibility tests used without modification
-  - Broad MongoDB API coverage for compatibility validation
-  - Provides baseline for measuring DocumentDB compatibility
-
-**5. Target Systems:**
-- **DocumentDB Instance**: The system under test (local or remote deployment)
-- **MongoDB Instance**: Reference system for compatibility validation (local or remote deployment)
+  - Supports DocumentDB unique features and capabilities
 
 ### Functional Test Tagging System
 
-The following two-dimensional tagging strategy is used for organizing and filtering tests in the **documentdb-functional-test** suite:
+The following two-dimensional tagging strategy is used for organizing and filtering tests using pytest markers:
 
 **Horizontal Tags (API Operations):**
-- `find`, `insert`, `update`, `delete`, `aggregate`, `index`, `admin`, `collection-mgmt`
+- `find`, `insert`, `update`, `delete`, `aggregate`, `index`, `admin`, `collection_mgmt`
 
 **Vertical Tags (Cross-cutting Features):**
-- `rbac`, `decimal128`, `collation`, `transactions`, `geospatial`, `text-search`, `validation`, `ttl`
+- `rbac`, `decimal128`, `collation`, `transactions`, `geospatial`, `text_search`, `validation`, `ttl`
+
+**Additional Tags:**
+- `smoke`: Quick feature detection tests to determine if functionality is implemented
 
 **Example Test Tags:**
-- Find operation using decimal128 with collation: `[find, decimal128, collation]`
-- Find with RBAC: `[find, rbac]`
-- TTL Index creation: `[index, ttl]`
+- Find operation using decimal128 with collation: `@pytest.mark.find @pytest.mark.decimal128 @pytest.mark.collation`
+- Find with RBAC: `@pytest.mark.find @pytest.mark.rbac`
+- TTL Index creation: `@pytest.mark.index @pytest.mark.ttl`
+- Smoke test for aggregation: `@pytest.mark.aggregate @pytest.mark.smoke`
 
-### Deployment Architecture
+The tags are used for grouping, organizing and filtering tests. They allow users to run tests for specific features and enable grouping when reporting test results.
 
-The functional testing framework is deployed as a single Docker container that packages all components together.
+### Running the Tests
 
-*Architecture:*
-- Docker Image: `documentdb/functional-testing-suite`
-- Contains: Test Runner + Test Executor + Result Analyzer + Functional Test Suite
+The functional testing framework is available in two formats.
 
-*How it works:*
-- User runs the container with configuration parameters (e.g., which tests to run, tags to filter, parallelism level)
-- Test Runner parses configuration and identifies tests to execute
-- Test Executor runs tests in parallel internally (using threads/processes based on parallelism configuration)
-- Each test runs against both DocumentDB and MongoDB instances for compatibility validation
-- Result Analyzer processes results, categorizes any failures, compares outcomes, and generates compatibility reports
-- All components share the same container environment for efficient communication
+**1. Source Code (for contributors):**
+- Raw source code with pytest tests and plugins
+- Requires local Python environment setup
 
-*Architecture Benefits:*
-- **Simplicity**: Single container deployment with no inter-container communication or orchestration
-- **Resource Efficiency**: Lower resource overhead, no container orchestration needed
-- **True Single Command**: Achieves the success criteria of execution through a single command with no setup
-- **Simplified Debugging**: All logs and processes in one container for easier troubleshooting
+```bash
+git clone https://github.com/documentdb/functional-tests
+cd functional-tests
+pip install -r requirements.txt
+pytest --engine documentdb=mongodb://localhost:27017 --engine mongodb=mongodb://mongo:27017
+```
+
+**2. Docker Image (for cluster testing):**
+- Pre-built image with all dependencies included
+- Published as `documentdb/functional-tests`
+
+```bash
+# AWS DocumentDB
+docker run documentdb/functional-tests \
+  --engine documentdb=mongodb://cluster.docdb.amazonaws.com:27017 \
+  --engine mongodb=mongodb://mongo.example.com:27017
+
+# Azure Cosmos DB (MongoDB API)
+docker run documentdb/functional-tests \
+  --engine cosmosdb=mongodb://myaccount.mongo.cosmos.azure.com:27017 \
+  --engine mongodb=mongodb://mongo.example.com:27017
+```
+
+*Benefits:*
+- **Flexibility**: Contributors can run and debug tests locally
+- **Portability**: Docker image provides consistent environment for testing in remote environments
+- **CI/CD Integration**: Works with existing GitHub Actions workflows
 
 ### Test Execution Flow
 
 ```
-Test Runner:
-  → Parse configuration (test suite, tags, parallelism)
-  → Discover and filter tests based on configuration
-  → Schedule tests based on dependencies
-  → Send scheduled tests to Test Executor
-                    ↓
-Test Executor:
-  → Receive scheduled tests
-  → Create thread/process pool (size=N)
-  → Execute tests in parallel (N concurrent threads):
+pytest:
+  → Parse configuration (engines, tags, parallelism)
+  → Discover and filter tests based on markers
+  → Execute tests in parallel using pytest-xdist (multiprocessing)
       For each test:
-        For each target database (MongoDB, DocumentDB):
-          → Generate unique namespace
-          → Setup (data seeding if needed)
-          → Run test against target database
-          → Cleanup
-          → Collect results
-  → Wait for all threads to complete
-  → Return aggregated results
-                    ↓
-Test Runner:
-  → Receive all test results
-  → Pass results to Result Analyzer
+        For each target engine (parametrized):
+          → Generate unique namespace using test name
+          → Setup using pytest fixtures
+          → Run test against target engine
+          → Cleanup via fixture teardown
+          → Collect results (pass/fail)
+  → Generate output
                     ↓
 Result Analyzer:
-  → Receive test results
-  → Compare DocumentDB vs MongoDB results for each test
-  → Calculate compatibility metrics and statistics
-  → Identify patterns in test failures
-  → Generate reports and dashboards
-  → Return reports
+  → Parse pytest output
+  → Categorize results by failure type:
+    - UNSUPPORTED (smoke test failed)
+    - SPEC_FAILURE (assertion failed)
+    - UNEXPECTED_ERROR (infrastructure issue)
+  → Calculate metrics by tags
+  → Generate weighted overall compatibility scores
+  → Create reports and dashboards
                     ↓
-Test Runner:
-  → Receive final reports
-  → Return reports to user
+Output:
+  → Tag-level metrics
+  → Overall weighted compatibility scores
+  → Detailed failure categorization
+  → Multiple report formats (JSON, HTML, JUnit XML)
 ```
 
 ### Implementation Details
 
-#### Test Runner Implementation
+#### pytest Test Framework
 
 **Configuration Management:**
-- Configuration is provided via YAML configuration file
+- Configuration provided via command line arguments and optional YAML files
 - Configuration parameters:
-  - `test_suite`: Which test suite to run (documentdb-functional-test, mongodb-service-tests, or both)
-  - `tags`: List of tags to filter tests in documentdb-functional-test suite (e.g., `[find, rbac]`)
-  - `parallelism`: Number of concurrent test executors (default: CPU count)
-  - `documentdb_uri`: Connection string for DocumentDB instance
-  - `mongodb_uri`: Connection string for MongoDB reference instance
-  - `output_format`: Report format (json, html, junit)
-  - `fail_fast`: Whether to stop on first failure (default: false)
+  - `engine`: Engine configurations to test against (e.g., `--engine documentdb=mongodb://localhost:27017 --engine mongodb-7.0=mongodb://mongo:27017`)
+  - `tags`: pytest marker filtering (e.g., `-m "find and rbac"`)
+  - `parallelism`: Number of concurrent processes via pytest-xdist (e.g., `-n 8`)
+  - `output_format`: Report format (JSON via `--json-report`, JUnit XML via `--junitxml`)
+  - `fail_fast`: Stop on first failure (`-x`)
 
-**Test Discovery Mechanism:**
-- Scan test directories recursively for Python files matching pattern `test_*.py`
-- Parse test files to extract:
-  - Test function names (functions starting with `test_`)
-  - Test tags (from decorators like `@tags(['find', 'rbac'])`)
-  - Test dependencies (from `@depends_on(['test_name'])` decorators) - *Note: Dependency parsing is optional since most tests should not have dependencies*
-  - Parallel safety flag (from `@parallel_safe` decorator)
-- Build test registry with metadata for each discovered test
+**Test Discovery:**
+- Uses pytest's built-in discovery for files matching `test_*.py`
+- Leverages pytest markers for tagging and filtering
+- No custom test registry needed - pytest handles metadata
 
-**Test Scheduling Algorithm:**
-- Build dependency graph from test dependencies
-- Perform topological sort to determine execution order
-- Group tests into batches based on:
-  - Tests with no dependencies can run immediately
-  - Tests with dependencies wait for prerequisite tests to complete
-  - Parallel-safe tests are grouped for concurrent execution
-  - Sequential tests are isolated in separate batches
-- Send scheduled test batches to Test Executor for execution (Test Executor will execute tests within each batch in parallel using its internal thread pool based on parallelism configuration)
+**Multi-Engine Execution:**
+- Engines to run against specfied via configuration
+- Uses pytest parametrization to run same test against multiple engines
+- Each test automatically runs against all specified engines
 
-**State Management:**
-- Receive status updates from Test Executor about test execution state:
-  - Pending: Tests waiting to be executed
-  - Running: Tests currently being executed
-  - Completed: Tests that have finished (pass/fail)
-  - Skipped: Tests skipped due to failed dependencies
-- Use execution state to make scheduling decisions (e.g., when to send next batch based on dependencies)
-- Display real-time progress updates to user based on status received from Test Executor
-- Handle graceful shutdown on interrupt signals (SIGINT, SIGTERM) and coordinate with Test Executor to stop execution
-
-**Dependency Resolution:**
-
-**Note: Test dependencies should be used sparingly.** In most cases, use `setUp()` methods or fixtures instead to manage test prerequisites. Dependencies introduce tight coupling between tests and can cause:
-- Cascading failures (one failed test causes many to be skipped)
-- Reduced parallelism (dependent tests must wait)
-
-**When dependencies are appropriate (rare cases):**
-- Genuinely sequential tests that cannot be parallelized (e.g., multi-step transaction flows) or Migration/upgrade testing scenarios
-
-**Implementation:**
-- Tests can declare dependencies using `@depends_on(['test_name'])` decorator
-- Build dependency graph from parsed test metadata
-- Validate dependency graph at discovery time to detect cycles
-- Use topological sort to determine execution order
-- Dependent tests wait for prerequisite tests to complete
-- If a prerequisite test fails, dependent tests are marked as skipped
-
-**Preferred alternative:** Use `setUp()` or fixtures to create necessary preconditions for each test independently.
-
-#### Test Executor Implementation
-
-**Parallelism Mechanism:**
-- Use Python's `concurrent.futures.ThreadPoolExecutor` for I/O-bound test execution
-- Thread pool size determined by parallelism configuration parameter
-- Execute all tests within a received batch concurrently using the thread pool (Test Runner has already grouped tests appropriately based on parallel safety)
-- Each thread executes tests independently with isolated database namespaces
-- Thread-safe result collection using queue or thread-safe data structures
-
-**Namespace Isolation Strategy:**
-- Generate unique namespace for each test: `test_{test_name}_{timestamp}_{random_suffix}`
-- Create isolated database and collection with the same names in both DocumentDB and MongoDB:
-  - Database name: `test_db_{namespace}`
-  - Collection name: `test_collection_{namespace}`
-- The `DocumentDBTestCase` base class provides pre-scoped PyMongo database and collection objects:
-  - `self.test_database`: Database object scoped to the isolated namespace
-  - `self.test_collection`: Collection object scoped to the isolated namespace
-  - Test authors use these pre-configured objects directly without specifying database/collection names
-- For tests requiring multiple collections, test authors can access other collections via `self.test_database['collection_name']` (all within the same isolated database namespace)
-- Namespace cleanup will happen after test completion (success or failure)
-
-**Test Lifecycle Management:**
-For each test, the following phases are executed (once for each target database):
-
-1. **Setup Phase:**
-   - Create isolated namespace
-   - Establish connection to the target database
-   - Seed test data if specified in test fixture (using `load_fixture()`)
-   
-2. **Execution Phase:**
-   - Execute test function against the target database
-   - Capture result (return value, exceptions, execution time)
-   
-3. **Cleanup Phase:**
-   - Drop the test database created during the test (identified by namespace)
-   - Drop all users/roles etc created in the admin database (except admin user)
-   - Close database connections
-   - Log test execution details
-   
-   **Note:** Cleanup is handled automatically by the base class regardless of test success or failure. Test authors do not need to implement `tearDown()` unless they have additional cleanup requirements beyond what the base class provides.
-
-The test executor runs the complete lifecycle against each target database (DocumentDB/ MongoDB) ensuring isolated and independent execution for each database.
-
-**Error Handling:**
-- Catch and log all exceptions during test execution
-- Distinguish between:
-  - Test failures (assertion errors)
-  - Test errors (unexpected exceptions)
-  - Infrastructure errors (connection failures, timeouts)
-- Continue execution of other tests even if one test fails (unless fail_fast is enabled)
-- Provide detailed error messages with stack traces
+**Parallel Execution:**
+- Uses pytest-xdist for multiprocessing-based parallelism (avoids Python GIL limitations)
+- Automatic load balancing across worker processes
+- No custom thread pool management needed
 
 #### Test Organization
 
 **Directory Structure:**
+For large features like `find`, tests are split by sub-functionality: basic queries, query operators, logical operators, projections, sorting, cursors, etc. Each file contains focused test cases for that specific aspect.
+
 ```
 functional-tests/
-├── documentdb-functional-test/  # DocumentDB functional tests
-│   ├── test_find.py
-│   ├── test_insert.py
-│   ├── test_aggregate.py
-│   └── fixtures/                # Test data fixtures
-│       ├── users.json
-│       └── products.json
+├── find/                        # Find operation tests
+│   ├── test_basic_queries.py    # Simple find(), findOne()
+│   ├── test_query_operators.py  # $eq, $ne, $gt, $lt, $in, etc.
+│   ├── test_logical_operators.py # $and, $or, $not, $nor
+│   ├── test_projections.py      # Field inclusion/exclusion
+│   ├── test_sorting.py          # sort(), compound sorts
+│   └── test_cursors.py          # Cursor behavior, iteration
+├── aggregate/                   # Aggregation pipeline tests
+│   ├── test_match_stage.py
+│   ├── test_group_stage.py
+│   └── test_pipeline_combinations.py
 ├── common/                      # Shared utilities
-│   ├── test_base.py             # Base test class
-│   ├── fixtures.py              # Fixture loading utilities
+│   ├── conftest.py              # pytest fixtures
 │   └── assertions.py            # Custom assertion helpers
 └── config/
-    ├── default.yaml             # Default configuration
-    └── ci.yaml                  # CI-specific configuration
+    └── engines.yaml             # Engine configurations
 ```
 
 **File Naming Conventions:**
-- Test files: `test_<feature>.py` (e.g., `test_find.py`, `test_rbac.py`)
+- Test files: `test_<feature>.py` (e.g., `test_basic_queries.py`, `test_rbac.py`)
 - Test functions: `test_<scenario>` (e.g., `test_find_with_filter`, `test_rbac_read_permission`)
-- Fixture files: `<entity>.json` (e.g., `products.json`, `orders.json`)
+- Use snake_case for all method names following Python conventions
 
 **Test Example:**
 
 ```python
-from common.test_base import DocumentDBTestCase
-from common.decorators import tags, parallel_safe
+import pytest
+from pymongo import MongoClient
 
-@tags(['find', 'rbac'])
-@parallel_safe
-class TestRBACFind(DocumentDBTestCase):
+@pytest.fixture
+def collection(request, database_client):
+    """Create isolated collection for test"""
+    collection = database_client.test_db[request.node.name]
+    yield collection
+    collection.drop()
+
+@pytest.mark.documents([{"status": "active"}, {"status": "inactive"}])
+@pytest.mark.find
+@pytest.mark.rbac
+def test_rbac_read_permission(collection):
+    """Verify read-only user can query documents"""
+    # Test defines explicit specification for DocumentDB behavior
+    result = collection.find({"status": "active"})
+    result_list = list(result)
     
-    def setUp(self):
-        """Setup RBAC users and test data"""
-        # Create a user with read role (base class method handles admin operations)
-        self.create_user(
-            username='reader_user',
-            password='reader_pass',
-            roles=[{'role': 'read', 'db': self.test_database.name}]
-        )
-        
-        # Load product fixture data (base class method)
-        # Reads products.json and inserts into both DocumentDB and MongoDB
-        self.load_fixture('products.json')
-    
-    def test_rbac_read_permission(self):
-        """Verify read-only user can query products"""
-        # Authenticate as reader_user using base class method
-        self.authenticate('reader_user', 'reader_pass')
-        
-        # Execute find operation - should succeed with read permission
-        result = self.test_collection.find({'category': 'electronics'})
-        result_list = list(result)
-        
-        # Assertions
-        assert len(result_list) == 2, "Expected to find exactly 2 electronics products"
-    
-    # Note: tearDown is handled automatically by the base class
-    # The base class will:
-    # - Drop the test database created during the test
-    # - Drop all users/roles etc created (except admin user)
-    # 
-    # Custom tearDown is only needed for additional cleanup beyond the base class
+    # Specification-based assertions - defines expected DocumentDB behavior
+    assert len(result_list) == 1, "Expected to find exactly 1 active document"
+    assert result_list[0]["status"] == "active"
 ```
-
-**Fixture File Format:**
-
-Fixtures contain test data (documents) that get inserted into the test collection.
-
-Example - Product documents for testing (products.json):
-```json
-[
-  {
-    "_id": "prod1",
-    "name": "Laptop",
-    "category": "electronics",
-    "price": 999.99,
-    "in_stock": true
-  },
-  {
-    "_id": "prod2",
-    "name": "Desk Chair",
-    "category": "furniture",
-    "price": 299.99,
-    "in_stock": true
-  },
-  {
-    "_id": "prod3",
-    "name": "Monitor",
-    "category": "electronics",
-    "price": 399.99,
-    "in_stock": false
-  }
-]
-```
-
-These documents will be inserted into the test collection by `load_fixture()`, allowing your test to access the data in the collection and verify the feature.
 
 **Tagging Conventions:**
-- Use lowercase tags
-- Combine horizontal and vertical tags: `@tags(['find', 'rbac', 'decimal128'])`
-- Required tags for all tests: At least one horizontal tag (API operation)
-- Optional tags: Vertical tags for cross-cutting features
+- Use pytest markers: `@pytest.mark.find`, `@pytest.mark.rbac`
+- Combine horizontal and vertical tags: `@pytest.mark.find @pytest.mark.rbac @pytest.mark.decimal128`
+- Required: At least one horizontal tag (API operation)
+- Optional: Vertical tags for cross-cutting features
+- Smoke tests: `@pytest.mark.smoke` for quick feature detection
 
 
 #### Result Analyzer Implementation
 
 **Result Analysis:**
-The Result Analyzer examines test execution results from both MongoDB and DocumentDB to identify compatibility issues and patterns. Each test contains assertions that validate correct behavior - the analyzer's role is to surface failures and categorize them.
+The Result Analyzer is a post-processing script that parses pytest output to generate functionality metrics. Tests use specification-based assertions that define expected DocumentDB behavior.
 
 **Test Outcome Classification:**
-For each test, analyze the results from both databases:
+For each test, analyze the result.
 
-1. **Passed on Both (Compatible)**
-   - Test assertions passed on both MongoDB and DocumentDB
-   - No compatibility issues
+1. **Passed**
+   - Test assertions passed
+   - Feature works as specified
 
-2. **Failed on DocumentDB Only (Compatibility Issue)**
-   - Test passed on MongoDB but failed on DocumentDB
-   - Indicates a compatibility gap
-   - **This is the primary concern** - these tests identify areas where DocumentDB has gaps in functionality
+2. **Failed**
+   - Test assertions failed
+   - Feature does not work as specified
 
-3. **Failed on MongoDB Only (Difference in Behavior)**
-   - Test passed on DocumentDB but failed on MongoDB
-   - Indicates differing behavior between the databases
-
-4. **Failed on Both (Test or Infrastructure Issue)**
-   - Test failed on both MongoDB and DocumentDB
-   - Could indicate test logic errors, infrastructure problems, etc
-   - Requires investigation to determine root cause
+**Failure Type Categorization:**
+- **UNSUPPORTED**: Smoke test failed, feature not implemented
+- **SPEC_FAILURE**: Test assertion failed, feature is either partially implemented or has bugs
+- **UNEXPECTED_ERROR**: Infrastructure/connection issues
 
 **Failure Categorization by Tags:**
-Group failed tests by their tags to identify patterns and problem areas:
+Group test results by their pytest markers to identify patterns
 
-- **By API Operation Tags**: Which operations have compatibility issues?
-  - Example: "5 out of 20 `aggregate` tests failed on DocumentDB"
+- **By API Operation Tags**: Which operations have issues?
+  - Example: "5 out of 20 `aggregate` tests failed"
 
-- **By Feature Tags**: Which cross-cutting features have compatibility issues?
-  - Example: "8 out of 12 `decimal128` tests failed on DocumentDB"
-
-- **Combined Analysis**: Identify specific combinations with issues
-  - Example: "`aggregate` + `decimal128` tests are failing"
+- **By Feature Tags**: Which cross-cutting features have issues?
+  - Example: "8 out of 12 `decimal128` tests failed"
 
 **Metrics Calculation:**
-- **DocumentDB Pass Rate**: `tests_passed_on_documentdb / total_tests * 100`
-- **MongoDB Pass Rate**: `tests_passed_on_mongodb / total_tests * 100`
+- **Feature coverage**: Functionality validation across different DocumentDB features
+- **Tag-level metrics**: Pass rate for each tag
+- **Overall functionality**: Weighted compatibility metrics to prevent high-volume tags from dominating
 
 **Report Generation:**
 
-The framework generates multiple types of outputs, each serving different consumption models:
-
-- **JSON Report**: For machine consumption - enables programmatic access, custom analysis tools, monitoring system integration, historical data tracking, and building custom dashboards
-- **JUnit XML**: For Github integration - provides rich UI integration in GitHub Actions for PR reviews and quick status checks
-- **Dashboard**: For visual consumption - offers rich charts, tables, and trend analysis for deep investigation
+The framework generates multiple types of outputs for different consumption models
 
 1. **JSON Report** (for programmatic access and automation):
-   - **Primary purpose**: Machine-readable format for CI/CD pipelines, APIs, and automation scripts
-   - **Use cases**: 
-     - Custom analysis and reporting tools
-     - Integration with monitoring and alerting systems
-     - Historical data storage and trend tracking
-     - Building custom dashboards and visualizations
-     - Feeding data to other automation workflows
-   - **Content**: Concise, structured data with high-level test outcomes and metrics
+   - Machine-readable format for CI/CD pipelines and automation scripts
+   - Structured data with test outcomes and metrics by engine and tag
    - Brief error identification (error type only, not full details)
 
 ```json
 {
   "summary": {
     "total_tests": 150,
-    "passed_on_both": 140,
-    "failed_on_documentdb_only": 8,
-    "failed_on_mongodb_only": 1,
-    "failed_on_both": 1,
-    "documentdb_pass_rate": 93.3,
-    "mongodb_pass_rate": 99.3
+    "passed": 140,
+    "failed": 10,
+    "pass_rate": 93.3
+  },
+  "by_tags": {
+    "find": {"passed": 45, "failed": 5, "pass_rate": 90.0},
+    "aggregate": {"passed": 30, "failed": 3, "pass_rate": 90.9}
   },
   "tests": [
     {
       "name": "test_find_with_filter",
-      "mongodb_status": "passed",
-      "documentdb_status": "passed",
-      "outcome": "compatible",
-      "mongodb_duration": 0.45,
-      "documentdb_duration": 0.52,
+      "status": "passed",
+      "duration": 0.52,
       "tags": ["find"]
     },
     {
       "name": "test_aggregate_decimal",
-      "mongodb_status": "passed",
-      "documentdb_status": "failed",
-      "outcome": "compatibility_issue",
-      "mongodb_duration": 0.38,
-      "documentdb_duration": 0.41,
+      "status": "failed",
+      "duration": 0.41,
       "error_type": "AssertionError",
       "tags": ["aggregate", "decimal128"]
     }
@@ -536,29 +363,13 @@ The framework generates multiple types of outputs, each serving different consum
 }
 ```
 
-Note: The JSON report includes only `error_type` for quick identification. Full error messages, stack traces, and debugging details are available in the test execution logs.
+2. **JUnit XML** (for GitHub Actions integration):
+   - Standard test report format for CI/CD integration
+   - Rich UI integration in GitHub Actions for PR reviews
+   - Test results appear in "Checks" tab with failure details
 
-2. **JUnit XML (for GitHub Actions integration):**
-   
-   JUnit XML is a standard test report format that integrates seamlessly with GitHub Actions to provide rich test result visualization in pull requests.
-   
-   **How it works with GitHub Actions:**
-   - Framework generates JUnit XML file after test execution
-   - Various test reporter actions are available in the GitHub Actions Marketplace that can parse JUnit XML and visualize results
-   - Test results appear in the "Checks" tab of pull requests
-   - Test suites are grouped by tags for organized reporting
-   - Includes failure messages and stack traces for quick debugging
-   
-   **Benefits:**
-   - **Build gating**: Automatically mark builds as failed when tests fail
-   - **Test tracking**: Identify flaky tests and track pass/fail trends over time
-   - **Quick debugging**: View per-test status and failure details directly in PR UI
-   - **No log diving**: See test results without reading workflow logs
-   
-   Note: JUnit XML is an industry-standard format, so the framework could support other CI/CD platforms in the future if needed.
-
-3. **Dashboard:**
+3. **Dashboard** (for visual consumption):
    - Summary statistics with charts
    - Test results table with filtering by status/tags
-   - Detailed failure information with diffs
+   - Detailed failure information
    - Trend analysis using historical data
