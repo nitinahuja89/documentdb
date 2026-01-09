@@ -1,16 +1,26 @@
 ---
 rfc: 005
-title: "Functional Testing Framework for DocumentDB"
+title: "End-to-End Functional Testing Framework for DocumentDB"
 status: Draft
 owner: "@nitinahuja89"
 issue: "https://github.com/documentdb/documentdb/issues/367"
 ---
 
-# RFC-005: Functional Testing Framework for DocumentDB
+# RFC-005: End-to-End Functional Testing Framework for DocumentDB
 
 ## Problem
 
-DocumentDB currently lacks a systematic end-to-end functional testing framework that can validate correctness of its functionality.
+DocumentDB currently lacks a systematic end-to-end functional testing framework that validates correctness against behavioral specifications.
+
+**Existing test coverage:**
+- Component-level functionality (pg_documentdb regression tests)
+- Wire protocol compatibility (pg_documentdb_gw integration tests)
+- Core BSON operations (pg_documentdb_core tests)
+
+**The gap this RFC targets:**
+End-to-end functional testing that validates complete user flow against the specifications. This means testing from the user's perspective - when they send a query or command, do they get the expected result as defined by the specifications?
+
+**Example gap:** We have aggregation tests, but not systematic specification-informed validation that covers all aggregation operators with defined expected outputs across all supported data types and scenarios.
 
 **Who is impacted:**
 - Contributors who cannot easily validate that their changes don't break existing functionality
@@ -18,20 +28,18 @@ DocumentDB currently lacks a systematic end-to-end functional testing framework 
 - Product teams who lack visibility into functional correctness metrics
 
 **Current consequences:**
-- **Limited Confidence**: Developers cannot easily validate that their changes don't break existing functionality
-- **Functional Gaps**: No systematic way to measure and track end-to-end functional correctness
-- **Manual Testing Burden**: Contributors rely on manual testing, slowing development velocity
-- **Regression Risk**: Lack of automated end-to-end testing increases the risk of introducing regressions
-- **Feature Validation**: There is no testing framework to allow contributors to write end-to-end new test cases to validate their features
+- **Limited Confidence**: Developers cannot easily validate end-to-end functionality, increasing regression risk
+- **Functional Gaps**: No systematic way to measure and track functional correctness against specifications  
+- **Manual Testing Burden**: Contributors rely on manual testing for validation, slowing development velocity
 
 **Current workarounds:**
 - Manual testing by contributors before submitting PRs
 - Ad-hoc end-to-end functional testing
-- Reliance on unit tests that don't cover end-to-end scenarios
+- Reliance on existing tests that don't cover end-to-end specification validation
 - Post-deployment discovery of functional issues
 
 **Success criteria:**
-- Users are able to run all functional tests against locally hosted or remotely hosted DocumentDB with a single command and no setup involved
+- Users are able to run all functional tests against locally hosted or remotely hosted DocumentDB with a single command and no setup involved (DocumentDB setup and environment provisioning is outside the scope - the framework assumes a running DocumentDB instance and takes a connection string as input)
 - Contributors can simply add new test files and it would automatically get picked up to be run as part of the functional test suite
 - Contributors/ users should get a list of all the test failures together (the test execution should not abort on a single failed test)
 - Contributors get easy to understand messages/logs for each failing test that points to the exact cause for the failure
@@ -47,7 +55,7 @@ DocumentDB currently lacks a systematic end-to-end functional testing framework 
 
 ## Approach
 
-The proposed solution is a end-to-end functional testing framework that uses **specification-based testing** to validate DocumentDB functionality.
+The proposed solution is an end-to-end functional testing framework that uses **specification-informed testing** to validate DocumentDB functionality.
 
 **Self-contained Test Suite**: Tests with explicit specifications that define expected behavior for DocumentDB features. Tests can be executed against any engine implementing the MongoDB wire protocol.
 
@@ -96,7 +104,7 @@ The end-to-end functional testing framework leverages pytest as the core testing
 - **Responsibilities**:
   - Analyzes pass/fail results for DocumentDB functionality
   - Generates metrics by feature tags
-  - Categorizes failure types (UNSUPPORTED, SPEC_FAILURE, UNEXPECTED_ERROR)
+  - Categorizes failure types (PASS, FAIL, UNSUPPORTED, INFRA_ERROR)
   - Creates dashboards and reports
 
 **3. Test Suites:**
@@ -125,7 +133,7 @@ The following two-dimensional tagging strategy is used for organizing and filter
 - TTL Index creation: `@pytest.mark.index @pytest.mark.ttl`
 - Smoke test for aggregation: `@pytest.mark.aggregate @pytest.mark.smoke`
 
-The tags are used for grouping, organizing and filtering tests. They allow users to run tests for specific features and enable grouping when reporting test results.
+The tags are used for grouping, organizing and filtering tests. They allow users to run tests for specific features and enable grouping when reporting test results. All tests use the same failure types (PASS, FAIL, UNSUPPORTED, INFRA_ERROR) regardless of their tags.
 
 ### Running the Tests
 
@@ -182,9 +190,10 @@ pytest:
 Result Analyzer:
   → Parse pytest output
   → Categorize results by failure type:
-    - UNSUPPORTED (smoke test failed)
-    - SPEC_FAILURE (assertion failed)
-    - UNEXPECTED_ERROR (infrastructure issue)
+    - PASS (test succeeded)
+    - FAIL (assertion failed)
+    - UNSUPPORTED (feature not implemented)
+    - INFRA_ERROR (infrastructure issue)
   → Calculate metrics by tags
   → Generate weighted overall compatibility scores
   → Create reports and dashboards
@@ -295,20 +304,28 @@ def test_rbac_read_permission(collection):
 The Result Analyzer is a post-processing script that parses pytest output to generate functionality metrics. Tests use specification-based assertions that define expected DocumentDB behavior.
 
 **Test Outcome Classification:**
-For each test, analyze the result.
+For each test, analyze the result:
 
-1. **Passed**
+1. **PASS**
    - Test assertions passed
    - Feature works as specified
 
-2. **Failed**
+2. **FAIL**
    - Test assertions failed
    - Feature does not work as specified
 
+3. **UNSUPPORTED**
+   - Feature not implemented in DocumentDB
+
+4. **INFRA_ERROR**
+   - Infrastructure/connection issues
+   - Test system problems
+
 **Failure Type Categorization:**
-- **UNSUPPORTED**: Smoke test failed, feature not implemented
-- **SPEC_FAILURE**: Test assertion failed, feature is either partially implemented or has bugs
-- **UNEXPECTED_ERROR**: Infrastructure/connection issues
+- **PASS**: Test succeeded, behavior matches specification
+- **FAIL**: Feature exists but behaves incorrectly (assertion failed)
+- **UNSUPPORTED**: Feature not implemented in DocumentDB (expected for some MongoDB features)
+- **INFRA_ERROR**: Infrastructure/environment problem (connection issues, test setup failures, etc.)
 
 **Failure Categorization by Tags:**
 Group test results by their pytest markers to identify patterns
@@ -348,13 +365,13 @@ The framework generates multiple types of outputs for different consumption mode
   "tests": [
     {
       "name": "test_find_with_filter",
-      "status": "passed",
+      "status": "PASS",
       "duration": 0.52,
       "tags": ["find"]
     },
     {
       "name": "test_aggregate_decimal",
-      "status": "failed",
+      "status": "FAIL",
       "duration": 0.41,
       "error_type": "AssertionError",
       "tags": ["aggregate", "decimal128"]
