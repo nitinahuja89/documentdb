@@ -728,24 +728,22 @@ Hooks can enforce privileges for **all DocumentDB commands** as long as context 
 
 6. **New object handling challenge**: When new tables are created, they need appropriate permissions. Three approaches:
 
-   **Approach 1: Dynamic ALTER DEFAULT PRIVILEGES**
-   - Set up ALTER DEFAULT PRIVILEGES dynamically whenever:
-     * A new role gains CREATE privilege on a schema (becomes a creator role)
-     * A user is granted new privileges on a database (new permission set)
-   - Example: When alice is granted readWrite on sales:
-     * `ALTER DEFAULT PRIVILEGES FOR ROLE app_creator IN SCHEMA sales GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO alice`
-     * Repeat for each existing creator role that can create tables in sales schema
+   **Approach 1: Dynamic ALTER DEFAULT PRIVILEGES with Schema-Scoped Owner Roles**
+   - Use schema-scoped owner roles to manage ALTER DEFAULT PRIVILEGES efficiently
+   - Create a marker role per schema (e.g., `sales_table_creator`) and grant it to all roles that can create tables in that schema
+   - When granting privileges to users, reference the schema's owner role:
+     * `ALTER DEFAULT PRIVILEGES FOR ROLE sales_table_creator IN SCHEMA sales GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO alice`
+   - Adding new creator roles only requires granting them membership in the appropriate owner role (O(1) operation)
    - Pros:
      * Pure native PG mechanism, no event trigger overhead on table creation
-     * Handles dynamic creator roles
+     * Efficient management: Adding new creator roles is O(1) - just grant owner role membership
+     * Per-operation costs: Grant/revoke role is O(1), create user with R roles is O(R)
      * Automatic permission grants for future tables
    - Cons:
-     * O(C × P) complexity: C = number of creator roles, P = number of distinct permission sets
-     * Permission set explosion: 10 creator roles × 50 permission sets = 500 ALTER DEFAULT PRIVILEGES statements
-     * State management complexity: Must track which ALTER DEFAULT PRIVILEGES exist for cleanup
-     * Expensive grant/revoke: Each privilege grant requires C ALTER DEFAULT PRIVILEGES executions
-     * Scale challenges: Hundreds of statements accumulate in large systems
-     * Debugging difficulty: Hard to trace why user lacks access
+     * State management complexity: Must track which ALTER DEFAULT PRIVILEGES exist for cleanup during revoke operations
+     * Must coordinate schema-scoped owner roles with creator role lifecycle management
+   - Note: Grouping users into privilege set roles was considered to reduce ALTER DEFAULT PRIVILEGES statements, but rejected due to increased complexity with minimal benefit, especially when handling MongoDB's collection-scoped permissions which would require a privilege set role per unique (database, collection, privilege-set) combination.
+   - See [Appendix B](#appendix-b-detailed-sql-for-alter-default-privileges-approach) for detailed SQL examples of each operation
 
    **Approach 2: Event triggers only**
    - Use CREATE TABLE event triggers to dynamically grant permissions
@@ -778,20 +776,51 @@ Hooks can enforce privileges for **all DocumentDB commands** as long as context 
   * When `revokeRolesFromUser` called: must UPDATE custom metadata AND execute PG REVOKE commands atomically
   * If either operation fails partially, systems become inconsistent
   * If someone manually issues PG GRANT/REVOKE bypassing DocumentDB commands, PG's ACL changes but custom metadata doesn't know
-- Must choose between three approaches for new object handling, each with trade-offs
-- Overhead of managing PG GRANTs, ALTER DEFAULT PRIVILEGES, and potentially event triggers
-- Permission model mismatch - MongoDB's "grant role on database" vs PG's "grant permission on object" model (see [MongoDB's database-scoped role grants vs PG's cluster-wide role membership](#mongodbs-database-scoped-role-grants-vs-pgs-cluster-wide-role-membership) in the Problem section)
+- New object handling requires choosing between three approaches (ALTER DEFAULT PRIVILEGES, event triggers, or hybrid), each with trade-offs. With schema-scoped owner roles and ALTER DEFAULT PRIVILEGES, per-operation overhead is minimal (3-4 SQL statements per grant/revoke), but still requires coordination between PG ACLs and custom metadata
 - More complex testing to ensure both systems work together
 
 **Note**: This option requires using Dimension 1 Option C (Two-Tier Hybrid Storage) to store privileges appropriately.
 
 ---
 
-### Recommended Approach
+### Recommendation
+
+DocumentDB will only allow user/role creation in the admin database and not any other database. There is little value in allowing user/role creation across databases.
+
+Privileges corresponding to API's that DocumentDB will not implement will not be supported. For example, planCacheIndexFilter, querySettings etc.
 
 The preferred approach depends primarily on whether legitimate direct SQL access to DocumentDB tables is required. If direct SQL access is needed, we should use Option C (Two-Tier Hybrid Storage) combined with Option D (Hybrid Enforcement). This combination leverages PG's native ACL system for CRUD operations, providing the best performance while allowing standard SQL tools to work. However, this comes at the cost of increased complexity since the system must keep PG's ACL permissions synchronized with custom metadata tables.
 
 If we want all access for DocumentDB to go through either the Gateway or the Extension Command handlers, then we should use Option B (pgbson Document Metadata) for storage combined with Option C2 (PG Hooks - Extension-Set Context) for enforcement. This approach implements a fail-closed security model that blocks any direct SQL access to DocumentDB tables. While this provides stronger security guarantees and simpler storage management with a single metadata system, it prevents the use of standard SQL tools on DocumentDB tables.
+
+**Initial Implementation Plan:**
+
+We will implement **Option C (Two-Tier Hybrid Storage) combined with Option D (Hybrid Enforcement)** as our initial approach:
+
+1. **For CRUD privileges** (`find`, `insert`, `update`, `remove`): Leverage PostgreSQL's native ACL system for enforcement
+   - Store permissions using PG's GRANT/REVOKE and ALTER DEFAULT PRIVILEGES with schema-scoped owner roles
+   - Provides best performance for common operations and allows legitimate SQL access for administrative tools
+   
+2. **For custom DocumentDB privileges** (those without PG equivalents): Use **Option B (pgbson Document Metadata) for storage** combined with **Option C2 (PG Hooks - Extension-Set Context) for enforcement**
+   - Store privilege metadata as pgbson documents
+   - Enforce via PostgreSQL hooks that check custom authorization logic
+   - This custom authorization infrastructure is required anyway since many MongoDB privileges have no PG equivalents
+
+**This is a Two-Way Door Decision:**
+
+The choice to use PG's ACL system for CRUD privileges is reversible. Once we build and stabilize our custom authorization infrastructure (which is required for non-CRUD privileges regardless), we can migrate CRUD privilege enforcement to the custom system if needed. This migration would be transparent to users - no API changes or user-visible impact.
+
+**Performance Validation Strategy:**
+
+To validate the performance of authorization checks for CRUD operations, we will:
+1. Build the custom authorization infrastructure for non-CRUD privileges
+2. Use this infrastructure to test CRUD operation performance and compare against PG's ACL enforcement
+3. If the performance gap is minimal, we may consolidate all privilege enforcement into the custom authorization system for:
+   - Simplified architecture (single enforcement mechanism)
+   - Easier maintenance and debugging
+   - Greater flexibility for MongoDB-specific authorization semantics
+
+This approach allows us to start with the best-known stable and performant path (PG ACLs for CRUD) while building toward a potentially unified authorization system based on real stability and performance data.
 
 ---
 
@@ -944,3 +973,251 @@ Based on MongoDB's official [Privilege Actions documentation](https://www.mongod
 - ❌ `anyAction` - Allow any action (superuser-like, but grantable and resource-scoped unlike PG superuser)
 - ❌ `internal` - Internal system actions
 - ❌ `applyOps` - Apply oplog operations
+
+---
+
+## Appendix B: Detailed SQL for ALTER DEFAULT PRIVILEGES Approach
+
+This appendix provides detailed SQL examples for implementing Approach 1 (Dynamic ALTER DEFAULT PRIVILEGES with Schema-Scoped Owner Roles) from the hybrid enforcement option (Option D).
+
+### Schema-Scoped Owner Role Pattern
+
+The core concept is using marker roles per schema that all table creator roles become members of:
+
+```sql
+-- Create schema-scoped owner role (marker role for privilege management)
+CREATE ROLE sales_table_creator NOLOGIN;
+CREATE ROLE marketing_table_creator NOLOGIN;
+
+-- Grant creator roles membership in their schema's owner role
+GRANT sales_table_creator TO app_service;
+GRANT sales_table_creator TO admin_user;
+GRANT marketing_table_creator TO marketing_app;
+```
+
+### User/Role Management Operations
+
+#### 1. Grant Role to User
+**MongoDB Command**: `db.grantRolesToUser("alice", [{role: "readWrite", db: "sales"}])`
+
+**SQL Execution** (3 statements):
+```sql
+-- Store in custom metadata
+INSERT INTO user_roles (user_oid, role_name, database_name) 
+VALUES (alice_oid, 'readWrite', 'sales');
+
+-- Set default privileges for future tables (references owner role)
+ALTER DEFAULT PRIVILEGES FOR ROLE sales_table_creator IN SCHEMA sales
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO alice;
+
+-- Grant on existing tables
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA sales TO alice;
+```
+
+**Complexity**: O(1)
+
+#### 2. Revoke Role from User
+**MongoDB Command**: `db.revokeRolesFromUser("alice", [{role: "readWrite", db: "sales"}])`
+
+**SQL Execution** (4 statements):
+```sql
+-- Query metadata to determine what to revoke
+SELECT * FROM user_roles 
+WHERE user_oid = alice_oid 
+  AND role_name = 'readWrite' 
+  AND database_name = 'sales';
+
+-- Revoke default privileges
+ALTER DEFAULT PRIVILEGES FOR ROLE sales_table_creator IN SCHEMA sales
+  REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM alice;
+
+-- Revoke from existing tables
+REVOKE SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA sales FROM alice;
+
+-- Delete from metadata
+DELETE FROM user_roles 
+WHERE user_oid = alice_oid 
+  AND role_name = 'readWrite' 
+  AND database_name = 'sales';
+```
+
+**Complexity**: O(1)
+
+#### 3. Create User with Multiple Roles
+**MongoDB Command**: `db.createUser({user: "alice", pwd: "...", roles: [{role: "readWrite", db: "sales"}, {role: "read", db: "marketing"}]})`
+
+**SQL Execution** (1 + 2R statements, where R = number of roles):
+```sql
+-- Create the user (PG role)
+CREATE ROLE alice LOGIN PASSWORD '...';
+
+-- For each role (R=2 in this example):
+
+-- First role: sales readWrite
+INSERT INTO user_roles VALUES (alice_oid, 'readWrite', 'sales');
+ALTER DEFAULT PRIVILEGES FOR ROLE sales_table_creator IN SCHEMA sales
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO alice;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA sales TO alice;
+
+-- Second role: marketing read
+INSERT INTO user_roles VALUES (alice_oid, 'read', 'marketing');
+ALTER DEFAULT PRIVILEGES FOR ROLE marketing_table_creator IN SCHEMA marketing
+  GRANT SELECT ON TABLES TO alice;
+GRANT SELECT ON ALL TABLES IN SCHEMA marketing TO alice;
+```
+
+**Complexity**: O(R) where R = number of roles
+
+#### 4. Drop User
+**MongoDB Command**: `db.dropUser("alice")`
+
+**SQL Execution** (varies based on roles user has):
+```sql
+-- Query all roles for this user
+SELECT role_name, database_name FROM user_roles WHERE user_oid = alice_oid;
+
+-- For each role, revoke (similar to operation #2)
+-- If alice has 3 roles, execute revoke operations for each
+
+-- Finally drop the role (PG automatically cleans up ALTER DEFAULT PRIVILEGES references)
+DROP ROLE alice;
+
+-- Delete metadata
+DELETE FROM user_roles WHERE user_oid = alice_oid;
+```
+
+**Complexity**: O(R) where R = number of roles the user has
+
+### Creator Role Management
+
+#### 5. Add New Creator Role
+When granting CREATE privilege to a new role:
+
+**SQL Execution** (2 statements):
+```sql
+-- Grant CREATE privilege on the schema
+GRANT CREATE ON SCHEMA sales TO new_creator;
+
+-- Add to schema's owner role (this automatically applies all existing ALTER DEFAULT PRIVILEGES)
+GRANT sales_table_creator TO new_creator;
+```
+
+**Complexity**: O(1) - No ALTER DEFAULT PRIVILEGES updates needed!
+
+**Key Advantage**: All existing ALTER DEFAULT PRIVILEGES that reference `sales_table_creator` automatically apply to `new_creator` through role membership.
+
+#### 6. Drop Creator Role
+
+**SQL Execution** (2 statements):
+```sql
+-- Remove from owner role first
+REVOKE sales_table_creator FROM old_creator;
+
+-- Drop the role
+DROP ROLE old_creator;
+```
+
+**Complexity**: O(1)
+
+### Custom Role Operations
+
+#### 7. Update Role Privileges
+**MongoDB Command**: `db.updateRole("customRole", {privileges: [...]})`
+
+When changing what privileges a role provides, must update for all users with that role:
+
+**SQL Execution** (varies based on users with the role):
+```sql
+-- Query all users with this role
+SELECT user_oid, database_name FROM user_roles WHERE role_name = 'customRole';
+
+-- For each user with the role (U users):
+  -- Revoke old privileges
+  ALTER DEFAULT PRIVILEGES FOR ROLE db_table_creator IN SCHEMA db
+    REVOKE <old privileges> FROM user;
+  REVOKE <old privileges> ON ALL TABLES IN SCHEMA db FROM user;
+  
+  -- Grant new privileges
+  ALTER DEFAULT PRIVILEGES FOR ROLE db_table_creator IN SCHEMA db
+    GRANT <new privileges> TO user;
+  GRANT <new privileges> ON ALL TABLES IN SCHEMA db TO user;
+```
+
+**Complexity**: O(U) where U = number of users with that role
+
+#### 8. Drop Custom Role
+**MongoDB Command**: `db.dropRole("customRole")`
+
+**SQL Execution**:
+```sql
+-- Query all users with this role
+SELECT user_oid, database_name FROM user_roles WHERE role_name = 'customRole';
+
+-- For each user, revoke (similar to operation #2)
+
+-- Delete role metadata
+DELETE FROM role_privileges WHERE role_name = 'customRole';
+DELETE FROM user_roles WHERE role_name = 'customRole';
+```
+
+**Complexity**: O(U) where U = number of users with that role
+
+### Schema Operations
+
+#### 9. Create New Schema/Database
+**MongoDB**: First use of a new database (implicit creation)
+
+**SQL Execution** (3 statements):
+```sql
+-- Create the schema
+CREATE SCHEMA new_database;
+
+-- Create its owner role
+CREATE ROLE new_database_table_creator NOLOGIN;
+
+-- Grant schema ownership (optional, for management)
+ALTER SCHEMA new_database OWNER TO documentdb_admin;
+```
+
+**Complexity**: O(1)
+
+#### 10. Drop Schema
+**MongoDB Command**: `db.dropDatabase()`
+
+**SQL Execution** (2 statements):
+```sql
+-- Drop the schema (CASCADE removes tables and associated privileges)
+DROP SCHEMA old_database CASCADE;
+
+-- Drop its owner role
+DROP ROLE old_database_table_creator;
+
+-- Note: PG automatically cleans up ALTER DEFAULT PRIVILEGES referencing dropped schema/role
+```
+
+**Complexity**: O(1)
+
+### Summary Table
+
+| Operation | SQL Statements | Complexity | Notes |
+|-----------|---------------|------------|-------|
+| Grant role to user | 3 | O(1) | Uses schema owner role |
+| Revoke role from user | 4 | O(1) | Query + revoke + cleanup |
+| Create user with R roles | 1 + 2R | O(R) | Per-role operations |
+| Drop user with R roles | 2R + 2 | O(R) | Revoke all roles first |
+| Add creator role | 2 | O(1) | Just grant owner role membership |
+| Drop creator role | 2 | O(1) | Revoke membership first |
+| Update role (U users have it) | 4U | O(U) | Must update all users |
+| Drop role (U users have it) | 2U + 2 | O(U) | Revoke from all users |
+| Create schema | 3 | O(1) | Schema + owner role |
+| Drop schema | 2 | O(1) | Auto cleanup by PG |
+
+### Key Insights
+
+1. **Schema-scoped owner roles eliminate O(C) complexity**: Without owner roles, adding a new creator would require updating all P ALTER DEFAULT PRIVILEGES statements. With owner roles, it's just one GRANT statement.
+
+2. **Most common operations are O(1)**: Grant, revoke, and creator management are all constant time.
+
+3. **Only role definition changes affect multiple users**: Operations like `updateRole` that change what a role provides must update all users with that role, making them O(U).
+
+4. **PostgreSQL handles cleanup automatically**: When dropping schemas or roles, PostgreSQL's catalog system automatically cleans up related ALTER DEFAULT PRIVILEGES entries.
