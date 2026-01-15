@@ -810,6 +810,21 @@ We will implement **Option C (Two-Tier Hybrid Storage) combined with Option D (H
 
 The choice to use PG's ACL system for CRUD privileges is reversible. Once we build and stabilize our custom authorization infrastructure (which is required for non-CRUD privileges regardless), we can migrate CRUD privilege enforcement to the custom system if needed. This migration would be transparent to users - no API changes or user-visible impact.
 
+**Important Clarification on "Transparent to Users":**
+
+The migration from PG ACLs to custom authorization would be transparent to users accessing DocumentDB through documented APIs (MongoDB protocol via Gateway or Extension command handlers). However, there is one behavioral side effect to note:
+
+- **Current implementation (PG ACLs)**: Direct SQL access to DocumentDB tables (e.g., via psql) may work as a side effect of using PostgreSQL's native permission system
+  
+- **After migration (custom authorization)**: Direct SQL access would no longer work, as permissions would only be enforced through DocumentDB's command handlers and hooks
+
+This is acceptable because:
+1. DocumentDB's authorization contract only covers the MongoDB-compatible API
+2. Direct SQL access to DocumentDB tables is not a documented or supported feature
+3. All documented access patterns (through MongoDB protocol) remain unchanged
+
+Users relying on direct SQL access for administrative purposes should use documented administrative tools and APIs instead.
+
 **Performance Validation Strategy:**
 
 To validate the performance of authorization checks for CRUD operations, we will:
